@@ -8,8 +8,8 @@ const app = express();
 app.use(bodyParser.json());
 
 // 会話履歴と制限
-const userConversations = {}; // 回数管理
-const conversationHistory = {}; // 文脈管理
+const userConversations = {};
+const conversationHistory = {};
 const DAILY_LIMIT = 5;
 const MAX_HISTORY = 5;
 
@@ -27,25 +27,35 @@ function updateConversationHistory(userId, userMessage, gptReply) {
   if (!conversationHistory[userId]) {
     conversationHistory[userId] = [];
   }
-
   conversationHistory[userId].push({ role: "user", content: userMessage });
   conversationHistory[userId].push({ role: "assistant", content: gptReply });
-
   if (conversationHistory[userId].length > MAX_HISTORY * 2) {
     conversationHistory[userId] = conversationHistory[userId].slice(-MAX_HISTORY * 2);
   }
 }
 
 app.post("/webhook", async (req, res) => {
-  console.log("\u{1F7E2} Webhook受信:", JSON.stringify(req.body, null, 2));
+  console.log("🟢 Webhook受信:", JSON.stringify(req.body, null, 2));
 
   if (!validateSignature(req)) {
-    console.log("\u26A0\uFE0F 署名検証に失敗。LINEからのリクエストではありません。");
+    console.log("⚠️ 署名検証に失敗。LINEからのリクエストではありません。");
     return res.status(401).send("Unauthorized");
   }
 
   const events = req.body.events;
   for (const event of events) {
+    const replyToken = event.replyToken;
+
+    // 無効なトークン or 再送イベントを除外
+    if (
+      replyToken === "00000000000000000000000000000000" ||
+      replyToken === "ffffffffffffffffffffffffffffffff" ||
+      event.deliveryContext?.isRedelivery
+    ) {
+      console.log("⚠️ 無効トークンまたは再送信イベントをスキップ");
+      continue;
+    }
+
     if (event.type === "message" && event.message.type === "text") {
       const userId = event.source.userId;
       const userMessage = event.message.text;
@@ -57,7 +67,7 @@ app.post("/webhook", async (req, res) => {
 
       if (userConversations[key] > DAILY_LIMIT) {
         const upgradeMessage = `
-\u26A0\uFE0F ご利用上限を超えました！
+⚠️ ご利用上限を超えました！
 
 無料版では1日${DAILY_LIMIT}回までのご相談となっております。
 
@@ -68,21 +78,25 @@ https://note.com/ryu_johnson/n/nd5e009c54d31
 https://chatgpt.com/g/g-67dd560b6d508191b9cd8aa428030939-insiyokutiyanti-yan-ban-yin-shi-dian-xiang-keaikonsarutanto
 `;
 
-        await axios.post(
-          "https://api.line.me/v2/bot/message/reply",
-          {
-            replyToken: event.replyToken,
-            messages: [{ type: "text", text: upgradeMessage }],
-          },
-          {
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+        try {
+          await axios.post(
+            "https://api.line.me/v2/bot/message/reply",
+            {
+              replyToken,
+              messages: [{ type: "text", text: upgradeMessage }],
             },
-          }
-        );
+            {
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+              },
+            }
+          );
+        } catch (replyError) {
+          console.error("❌ 上限通知の返信エラー:", replyError.response?.data || replyError.message);
+        }
 
-        return res.send("OK");
+        continue; // 他の処理はスキップ
       }
 
       try {
@@ -109,7 +123,7 @@ https://chatgpt.com/g/g-67dd560b6d508191b9cd8aa428030939-insiyokutiyanti-yan-ban
           "https://api.openai.com/v1/chat/completions",
           {
             model: "gpt-3.5-turbo",
-            messages: messages,
+            messages,
           },
           {
             headers: {
@@ -122,23 +136,26 @@ https://chatgpt.com/g/g-67dd560b6d508191b9cd8aa428030939-insiyokutiyanti-yan-ban
         const replyText = gptResponse.data.choices[0].message.content;
         updateConversationHistory(userId, userMessage, replyText);
 
-        await axios.post(
-          "https://api.line.me/v2/bot/message/reply",
-          {
-            replyToken: event.replyToken,
-            messages: [{ type: "text", text: replyText }],
-          },
-          {
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+        try {
+          await axios.post(
+            "https://api.line.me/v2/bot/message/reply",
+            {
+              replyToken,
+              messages: [{ type: "text", text: replyText }],
             },
-          }
-        );
-
-        console.log("\u{1F389} 応答成功");
-      } catch (error) {
-        console.error("❌ エラー:", error.response?.data || error.message);
+            {
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+              },
+            }
+          );
+          console.log("🎉 応答成功");
+        } catch (replyError) {
+          console.error("❌ LINE返信エラー:", replyError.response?.data || replyError.message);
+        }
+      } catch (gptError) {
+        console.error("❌ OpenAIエラー:", gptError.response?.data || gptError.message);
       }
     }
   }
@@ -148,5 +165,5 @@ https://chatgpt.com/g/g-67dd560b6d508191b9cd8aa428030939-insiyokutiyanti-yan-ban
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`\u{1F680} いんしょくちゃんLINE Bot 起動中（ポート: ${port}）`);
+  console.log(`🚀 いんしょくちゃんLINE Bot 起動中（ポート: ${port}）`);
 });
